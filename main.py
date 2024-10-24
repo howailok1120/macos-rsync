@@ -4,11 +4,22 @@ import sys
 import shlex
 import re
 import time
+import json
 
 def rsync_files(source, destination, direction='one-way', delete=False, smb_user=None, smb_password=None):
     try:
-        # Basic rsync command
+        # Basic rsync command with exclusions
         command = ['rsync', '-avz', '--stats']
+        
+        # Add exclusions
+        exclusions = [
+            '--exclude=.*',  # Exclude hidden files and directories
+            '--exclude=~$*',  # Exclude temporary Office files
+            '--exclude=$RECYCLE.BIN',  # Exclude Recycle Bin
+            '--exclude=desktop.ini',  # Exclude desktop.ini
+            '--exclude=Thumbs.db'  # Exclude Thumbs.db
+        ]
+        command.extend(exclusions)
 
         # Add delete option
         if delete:
@@ -20,7 +31,7 @@ def rsync_files(source, destination, direction='one-way', delete=False, smb_user
         elif direction == 'two-way':
             command.extend([source + '/', destination])
             # From destination back to source
-            command.extend(['&&', 'rsync', '-avz', '--stats', destination + '/', source])
+            command.extend(['&&', 'rsync', '-avz', '--stats'] + exclusions + [destination + '/', source])
 
         # Print the command being executed (with sensitive info redacted)
         print(f"Executing command: {' '.join(shlex.quote(arg) for arg in command)}")
@@ -39,30 +50,37 @@ def rsync_files(source, destination, direction='one-way', delete=False, smb_user
         # Capture output
         output, stderr = process.communicate()
         
-        if process.returncode == 0:
-            print("\nFile synchronization successful!")
-            # Parse the output to get the number of files copied and deleted
+        result = {
+            "success": process.returncode == 0,
+            "returnCode": process.returncode,
+            "filesCopied": 0,
+            "filesDeleted": 0,
+            "totalFileSize": "0 bytes",
+            "speedup": "0.00",
+            "error": stderr if process.returncode != 0 else None
+        }
+
+        if result["success"]:
             files_copied = re.search(r'Number of files transferred: (\d+)', output)
             files_deleted = re.search(r'Number of deleted files: (\d+)', output)
+            total_size = re.search(r'Total file size: ([\d,]+ bytes)', output)
+            speedup = re.search(r'speedup is ([\d.]+)', output)
             
             if files_copied:
-                print(f"Files copied: {files_copied.group(1)}")
+                result["filesCopied"] = int(files_copied.group(1))
             if files_deleted:
-                print(f"Files deleted: {files_deleted.group(1)}")
-            
-            # Print a summary of changes
-            print("\nSummary of changes:")
-            print(output)
-        else:
-            print(f"\nFile synchronization failed with return code {process.returncode}")
-            print("Error output:")
-            print(stderr)
-            print("Command output:")
-            print(output)
-    except subprocess.CalledProcessError as e:
-        print(f"File synchronization failed: {e}")
+                result["filesDeleted"] = int(files_deleted.group(1))
+            if total_size:
+                result["totalFileSize"] = total_size.group(1)
+            if speedup:
+                result["speedup"] = speedup.group(1)
+
+        print(json.dumps(result, indent=2))
+        return result
+
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(json.dumps({"success": False, "error": str(e)}, indent=2))
+        return {"success": False, "error": str(e)}
 
 def handle_smb_path(path, user, password):
     # Convert SMB path to a local mount point
