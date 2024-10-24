@@ -9,7 +9,7 @@ import json
 def rsync_files(source, destination, direction='one-way', delete=False, smb_user=None, smb_password=None):
     try:
         # Basic rsync command with exclusions
-        command = ['rsync', '-avz', '--stats']
+        base_command = ['rsync', '-avz', '--stats']
         
         # Add exclusions
         exclusions = [
@@ -19,57 +19,69 @@ def rsync_files(source, destination, direction='one-way', delete=False, smb_user
             '--exclude=desktop.ini',  # Exclude desktop.ini
             '--exclude=Thumbs.db'  # Exclude Thumbs.db
         ]
-        command.extend(exclusions)
+        base_command.extend(exclusions)
 
-        # Add delete option
+        # Handle delete option
+        if delete and direction == 'two-way':
+            print("Warning: Delete option is not supported for two-way sync. Ignoring delete option.")
+            delete = False
+
         if delete:
-            command.append('--delete')
+            base_command.append('--delete')
 
-        # Add source and destination based on direction
+        # Prepare commands for one-way or two-way sync
         if direction == 'one-way':
-            command.extend([source + '/', destination])
+            commands = [base_command + [source + '/', destination]]
         elif direction == 'two-way':
-            command.extend([source + '/', destination])
-            # From destination back to source
-            command.extend(['&&', 'rsync', '-avz', '--stats'] + exclusions + [destination + '/', source])
+            commands = [
+                base_command + [source + '/', destination],
+                base_command + [destination + '/', source]
+            ]
 
-        # Print the command being executed (with sensitive info redacted)
-        print(f"Executing command: {' '.join(shlex.quote(arg) for arg in command)}")
-
-        # Call rsync command
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        
-        # Show a simple progress indicator
-        print("Synchronizing: ", end='', flush=True)
-        while process.poll() is None:
-            sys.stdout.write('.')
-            sys.stdout.flush()
-            time.sleep(1)
-        print()  # New line after progress indicator
-
-        # Capture output
-        output, stderr = process.communicate()
-        
         result = {
-            "success": process.returncode == 0,
-            "returnCode": process.returncode,
+            "success": True,
+            "returnCode": 0,
             "filesCopied": 0,
             "filesDeleted": 0,
             "totalFileSize": "0 bytes",
             "speedup": "0.00",
-            "error": stderr if process.returncode != 0 else None
+            "error": None
         }
 
-        if result["success"]:
+        for cmd in commands:
+            # Print the command being executed (with sensitive info redacted)
+            print(f"Executing command: {' '.join(shlex.quote(arg) for arg in cmd)}")
+
+            # Call rsync command
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            
+            # Show a simple progress indicator
+            print("Synchronizing: ", end='', flush=True)
+            while process.poll() is None:
+                sys.stdout.write('.')
+                sys.stdout.flush()
+                time.sleep(1)
+            print()  # New line after progress indicator
+
+            # Capture output
+            output, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                result["success"] = False
+                result["returnCode"] = process.returncode
+                result["error"] = stderr
+                break
+
+            # Parse output for statistics
             files_copied = re.search(r'Number of files transferred: (\d+)', output)
             files_deleted = re.search(r'Number of deleted files: (\d+)', output)
             total_size = re.search(r'Total file size: ([\d,]+ bytes)', output)
             speedup = re.search(r'speedup is ([\d.]+)', output)
             
             if files_copied:
-                result["filesCopied"] = int(files_copied.group(1))
+                result["filesCopied"] += int(files_copied.group(1))
             if files_deleted:
-                result["filesDeleted"] = int(files_deleted.group(1))
+                result["filesDeleted"] += int(files_deleted.group(1))
             if total_size:
                 result["totalFileSize"] = total_size.group(1)
             if speedup:
@@ -98,6 +110,15 @@ def main():
     source_path = input("Enter the source directory path: ").strip()
     destination_path = input("Enter the destination directory path: ").strip()
 
+    direction = input("Choose sync direction (one-way or two-way): ").strip().lower()
+    
+    delete = False
+    if direction == 'one-way':
+        delete = input("Delete files in the destination? (yes or no): ").strip().lower() == 'yes'
+    elif direction != 'two-way':
+        print("Invalid direction. Please choose 'one-way' or 'two-way'.")
+        return
+
     smb_user = None
     smb_password = None
 
@@ -111,9 +132,6 @@ def main():
             smb_user = input("Enter SMB username for destination: ")
             smb_password = input("Enter SMB password for destination: ")
         destination_path = handle_smb_path(destination_path, smb_user, smb_password)
-
-    direction = input("Choose sync direction (one-way or two-way): ").strip().lower()
-    delete = input("Delete files in the destination? (yes or no): ").strip().lower() == 'yes'
 
     rsync_files(source_path, destination_path, direction, delete, smb_user, smb_password)
 
